@@ -1,0 +1,363 @@
+---
+title: "Wordpress"
+author: "QuantVentura"
+output:
+  pdf_document: default
+  html_document:
+    fig_caption: yes
+    self_contained: no
+    keep_md: yes
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r, include=FALSE}
+Sys.setenv(LANG = "en", TZ = "GMT")
+Sys.setlocale("LC_TIME", "English")
+```
+
+```{r, include=FALSE}
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(modelr)
+library(scales)
+library(lubridate)
+options(scipen = 100)
+```
+
+```{r}
+historical <- read.csv("C:/Users/gert/Desktop/Coursera/Historical Data/historical.csv")
+```
+
+```{r}
+res.daily <- GET("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&startTime=1615032000000")
+content.daily <-content(res.daily, as = "text", encoding = "UTF-8")
+
+# Getting data out of JSON file
+data.daily <- fromJSON(content.daily, flatten = TRUE) %>%
+  data.frame() # we get 12 colums(X1:X12)
+
+# Converting character columns to numeric class
+data.daily$X1 <-as.numeric(data.daily$X1)
+data.daily$X2 <- as.numeric(data.daily$X2)
+
+# Selecting only first two columns "Open time"; "Open price" and renaming them
+data.daily <- select(data.daily, "Open time" = "X1", "Open price" = "X2")
+
+# Converting ms to Date
+data.daily$`Open time` <-as.POSIXct(as.numeric(data.daily$`Open time`)/1000, origin = "1970-01-01",tz = "GMT")
+
+historical$Open.time <- as.Date(historical$Open.time)
+historical <- historical %>% rename("Open time" = "Open.time", "Open price" = "Open.price")
+
+historical <- rbind(historical, data.daily)
+
+```
+
+```{r, warning = FALSE}
+historical.linear <- historical
+historical$`Open price` <- log10(historical$`Open price`)
+linear_model_BC <- lm(`Open price` ~ `Open time`, data = historical)
+
+coef <- coef(linear_model_BC)[[2]]   # 0.001164147  
+intercept <- round(coef(linear_model_BC)[[1]], digits = 2 ) # -16.98151
+
+(lm.BC.plot <- ggplot(data = historical.linear) + 
+    geom_line(mapping = aes(x = `Open time`, y = `Open price`)) +
+    geom_abline(slope = coef(linear_model_BC)[[2]], intercept = coef(linear_model_BC)[[1]]) +
+    scale_y_log10(labels = dollar, limits=c(0.1, 1000000)) +
+    annotate("text", x = as.Date("2020-01-01","%Y-%m-%d"), y = 1000000, label =    (paste("R^2 ==", round(summary(linear_model_BC)$r.squared, digits = 4))), parse = TRUE) +
+    annotate("text", x = as.Date("2014-01-01","%Y-%m-%d"), y = 10000, label = (paste("f(x) == 10^(x*",coef, ")")))) +
+  ggtitle("Bitcoin Long Term Trend",
+                subtitle = paste("Updated", Sys.time(), "GMT+0")) +
+  xlab("Date") +
+  ylab("Spot Price")
+
+dev.copy(png, "Bitcoin-Long-Term-Trend.png", width=852, height=700)
+dev.off()
+```
+
+```{r, message=FALSE}
+# Making a grid (x values)
+grid.BC <- historical %>% 
+  data_grid(`Open time`)
+
+# Getting y values for the grid
+grid.BC <- grid.BC %>% 
+  add_predictions(linear_model_BC)
+
+# Adding residuals (deviation) to market.price dataset
+historical <- historical %>%
+  add_residuals(linear_model_BC)
+
+# Plotting deviation
+(BC <-ggplot(historical, aes(`Open time`, resid)) +
+  geom_ref_line(h = 0) +
+  geom_line() +
+  ggtitle("Deviation From The Long Term Trend",
+          subtitle = paste("Updated", Sys.time(), "GMT+0"))) +
+  ylab("log10") +
+  xlab("Date")
+
+dev.copy(png, "Deviation-From-The-Long-Term-Trend.png", width=852, height=700)
+dev.off()
+```
+
+```{r}
+(histogram <-ggplot(historical, aes(x=resid)) + 
+  geom_histogram(color="black",fill="blue", bins = 100) + 
+   coord_flip()) +
+  ylab("Number of Days") +
+  xlab("Deviation") +
+  ggtitle("Days Spent in Deviation",
+          subtitle = paste("Bins = 100", ",Updated", Sys.time()))
+```
+
+```{r}
+res <- GET("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=30m&limit=960")
+content <-content(res, as = "text", encoding = "UTF-8") 
+
+lastdays <- fromJSON(content, flatten = TRUE) %>%
+ data.frame() # we get 12 colums(X1:X12)
+
+lastdays$X1 <-as.numeric(lastdays$X1)
+lastdays$X2 <- as.numeric(lastdays$X2)
+
+# Selecting only first two columns "Open time"; "Open price" and renaming them
+lastdays <- select(lastdays, "Open time" = "X1", "Open price" = "X2")
+
+lastdays$`Open time` <- as.POSIXct(lastdays$`Open time`/1000, origin = "1970-01-01",tz = "GMT")
+
+trend <- 10^tail(linear_model_BC[["fitted.values"]], n=1)
+
+lastdays$`Open price` <- lastdays$`Open price`-trend
+```
+
+```{r, message = FALSE, warning = FALSE}
+(G <-ggplot(lastdays, aes(`Open time`, `Open price`)) +
+     geom_ref_line(h = 0) +
+     geom_line() +
+     ggtitle("Deviation From The Long Term Trend, Last 30 days",
+             subtitle = paste("Data = Binance, Interval = 30min, Updated", 
+                              Sys.time(), "GMT+0")) +
+     scale_y_continuous(labels=scales::dollar_format()) +
+     ylab("Spot Price")) 
+```
+```{r, message = FALSE, warning = FALSE}
+historical.linear <- historical.linear %>% select("Open.time" = `Open time`, "Open.price" = `Open price`)
+
+historical <- historical %>% select("Open.time" = `Open time`, "Open.price" = `Open price`)
+
+historical$Open.price <- historical.linear$Open.price
+historical$increase <- historical$Open.price
+
+
+historical$increase[1:168] <- (historical$Open.price[1:168]*100/0.05-100)/100
+```
+```{r}
+historical$increase[169:527] <- (historical$Open.price[169:527]*100/0.3-100)/100
+```
+```{r}
+historical$increase[528:893] <- (historical$Open.price[528:893]*100/4.9-100)/100
+```
+```{r}
+historical$increase[894:1258] <- (historical$Open.price[894:1258]*100/13.01-100)/100
+```
+```{r}
+historical$increase[1259:1623] <- (historical$Open.price[1259:1623]*100/745.45-100)/100
+```
+```{r}
+historical$increase[1624:1988] <- (historical$Open.price[1624:1988]*100/313.81-100)/100
+```
+```{r}
+historical$increase[1989:2354] <- 
+(historical$`Open.price`[1989:2354]*100/430.89-100)/100
+```
+```{r}
+historical$increase[2355:2719] <- (historical$Open.price[2355:2719]*100/966.34-100)/100
+```
+```{r}
+historical$increase[2720:3084] <- 
+(historical$Open.price[2720:3084]*100/13880-100)/100
+```
+```{r}
+historical$increase[3085:3449] <- 
+(historical$Open.price[3085:3449]*100/3696.85-100)/100
+```
+```{r}
+historical$increase[3450:3815] <- (historical$Open.price[3450:3815]*100/7160.69-100)/100
+```
+```{r}
+historical$increase[- (1:3815)] <- (historical$Open.price[- (1:3815)]*100/28999.63-100)/100
+```
+```{r, warning = FALSE}
+
+  lal_trans_transform <- function(x) case_when(
+    x < -1 ~ -log10(abs(x)) - 1,
+    x > 1 ~ log10(x) + 1,
+    TRUE ~ x
+  )
+
+historical$log_increase <- lal_trans_transform(historical$increase)
+
+  
+historical$year <-as.POSIXct(historical$Open.time, format = "%Y/%m/%d")
+historical$year <- format(historical$year, format="%Y") %>% as.factor()
+historical$day <- as.POSIXct(historical$Open.time, format = "%Y/%m/%d")
+historical$day <- format(historical$day, format = "%j") %>% as.numeric()
+
+(Daily_Price_Change <-ggplot(data = historical) +
+  geom_line(aes(x = day, y = log_increase, color = year)) + 
+  ggtitle(paste("Daily Price Change from 2010-07-17 to", Sys.time(), "GMT+0")) +
+  xlab("Day of The Year") +
+  ylab("Change (log10)"))
+
+```
+
+```{r Last 12 Months Hourly, message = FALSE, include = FALSE, warning = FALSE}
+days <-(seq(as.Date("2020-2-2"), as.Date("2021-2-2"), by = "days"))
+days <- data.frame(days) %>% rename(startDay = days)
+
+days$endDay <- seq(as.Date("2020-2-3"), as.Date("2021-2-3"), by = "days")
+
+days$`startTime(ms)` <- (as.numeric(days$startDay)*1000*86400)
+days$`endTime(ms)` <- (as.numeric(days$endDay)*1000*86400)
+
+days$url <- "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&startTime=XXXXXXXXXXXXX&endTime=YYYYYYYYYYYYYY"
+
+function_startTime <- function(x, y) {
+  gsub("XXXXXXXXXXXXX",x, y)
+}
+
+function_endTime <- function(x, y) {
+  gsub("YYYYYYYYYYYYYY",x, y)
+}
+
+output <- vector("double", nrow(days))
+for (i in seq_along(days$url)) {
+  output[[i]] <- function_startTime(days$`startTime(ms)`[[i]], days$url[[i]])
+}
+days$url <- output
+
+output <- vector("double", nrow(days))
+for (i in seq_along(days$url)) {
+  output[[i]] <- function_endTime(days$`endTime(ms)`[[i]], days$url[[i]])
+}
+days$url <- output
+
+url_list <- days$url
+
+looped_content <- vector("list", length(url_list)) 
+for (i in seq_along(url_list)) {
+  looped_content[[i]] <- content(GET(url_list[[i]]), as = "text", encoding = "UTF-8")
+} 
+
+for (i in seq_along(looped_content)) {
+  looped_content[[i]] <- fromJSON(looped_content[[i]], flatten = TRUE)
+}
+
+pastyear <- Reduce(rbind.data.frame, looped_content)
+
+pastyear <- select(pastyear, "Open time" = "V1", "Open price" = "V2")
+pastyear$`Open time` <-as.numeric(pastyear$`Open time`)
+pastyear$`Open price` <- as.numeric(pastyear$`Open price`)
+
+
+pastyear$`Open time` <- as.POSIXct(pastyear$`Open time`/1000, origin = "1970-01-01",tz = "GMT")
+
+pastyear$Change <- (pastyear$`Open price`/lag(pastyear$`Open price`) * 100-100)
+pastyear <- tail(pastyear, n=743)
+pastyear$weekdays <-weekdays(pastyear$`Open time`)
+pastyear$weekdays <- as.factor(pastyear$weekdays)
+pastyear$`Open time` <-format(pastyear$`Open time`, "%H:%M:%S")
+pastyear <- pastyear %>% group_by(weekdays, `Open time`)
+pastyear <- pastyear %>% summarise(mean = mean(Change))
+pastyear$`Open time` <- hour(as.POSIXct(strptime(pastyear$`Open time`,"%H:%M:%S")))
+
+ggplot(data = pastyear, aes(x=`Open time`, y= mean, group = weekdays, colour = weekdays)) + 
+  geom_line(size = 1.2, alpha = 0.75) +
+  ggtitle("Most Profitable Trading Hours (last 365 days)",
+             subtitle = paste("Data = Binance, Updated", 
+                              Sys.time(), "GMT+0"))
+```
+
+```{r heatmap last 12 months, message = FALSE, warning = FALSE}
+(Heatmap_12months <- ggplot(data = pastyear, aes(x=`Open time`, y=weekdays, fill = mean))+
+  geom_raster() +
+  scale_fill_distiller() +
+  scale_x_continuous(breaks=seq(0,24,1)) +
+  coord_flip() +
+  geom_text(aes(label = round(mean,2))) +
+  ggtitle("Most Profitable Trading Hours in % (last 365 days)",
+             subtitle = paste("Data = Binance, Updated", 
+                              Sys.time(), "GMT+0")))
+```
+
+```{r heatmap last 30 days 1 hour interval}
+data <- GET("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=744")
+data <-content(data, as = "text", encoding = "UTF-8")
+
+# Getting data out of JSON file
+data <- fromJSON(data, flatten = TRUE) %>%
+  data.frame() # we get 12 colums(X1:X12)
+
+# Converting character columns to numeric class
+data$X1 <-as.numeric(data$X1)
+data$X2 <- as.numeric(data$X2)
+
+# Selecting only first two columns "Open time"; "Open price" and renaming them
+data <- select(data, "Open time" = "X1", "Open price" = "X2")
+
+# Converting ms to Date
+data$`Open time` <-as.POSIXct(as.numeric(data$`Open time`)/1000, origin = "1970-01-01",tz = "GMT")
+
+data$Change <- (data$`Open price`/lag(data$`Open price`) * 100-100)
+data <- tail(data, n=743)
+data$weekdays <-weekdays(data$`Open time`)
+data$weekdays <- as.factor(data$weekdays)
+data$`Open time` <-format(data$`Open time`, "%H:%M:%S")
+data <- data %>% group_by(weekdays, `Open time`)
+data <- data %>% summarise(mean = mean(Change))
+data$`Open time` <- hour(as.POSIXct(strptime(data$`Open time`,"%H:%M:%S")))
+
+(heatmap_last30 <-ggplot(data = data, aes(x=`Open time`, y=weekdays, fill = mean)) +
+  geom_raster() +
+  scale_fill_distiller() +
+  scale_x_continuous(breaks=seq(0,24,1)) +
+  coord_flip() +
+  geom_text(aes(label = round(mean,2))) +
+  ggtitle("Most Profitable Trading Hours in % (last 30 days)",
+             subtitle = paste("Data = Binance, Updated", 
+                              Sys.time(), "GMT+0")))
+```
+
+```{r Historically Top 10 Best & Worst days BTC/USD on Average}
+by_day <- historical.linear
+
+by_day$`Open.time` <- format(by_day$`Open.time`, format="%m-%d")
+
+by_day$change <-(historical.linear$`Open.price`/dplyr::lag(historical.linear$`Open.price`)) * 100-100
+
+by_day <- by_day %>% group_by(`Open.time`) 
+
+by_day$`Open time` <- as.factor(by_day$`Open.time`) 
+
+summarized <- summarize(by_day, 
+                        mean = mean(change), 
+                        median = median(change)) %>%
+  arrange(desc(mean))
+
+head <- head(summarized, n = 10)
+tail <- tail(summarized, n = 10)
+rbinded <- rbind(head, tail)
+
+ggplot(data = rbinded, aes(x = `Open.time`, y = mean)) +
+  geom_bar(stat = "identity", aes(fill = mean)) +
+  geom_tile(aes(x = `Open.time`, y = median), color = "green")+
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(title = "Historically Top 10 Best & Worst days BTC/USD on Average",
+       subtitle = "2010/01/17 to today(), green line = median")
+```       
+       
